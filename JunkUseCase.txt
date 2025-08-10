@@ -1,0 +1,499 @@
+package com.phone.antivirus.clean.aztac.domain.usecases
+
+import android.content.Context
+import android.os.Build
+import android.provider.MediaStore
+import com.phone.antivirus.clean.aztac.core.utils.setLog
+import com.phone.antivirus.clean.aztac.data.localdata.FakeData
+import com.phone.antivirus.clean.aztac.data.localdata.PermissionData
+import com.phone.antivirus.clean.aztac.data.models.Junk
+import com.phone.antivirus.clean.aztac.domain.interfaces.Utils
+import com.phone.antivirus.clean.aztac.presentation.ui.activities.junk_cleaner.JunkCleanerActivity
+import com.phone.antivirus.clean.aztac.presentation.ui.activities.junk_cleaner.components.CleanStatus
+import com.phone.antivirus.clean.aztac.presentation.ui.activities.junk_cleaner.components.JunkLoadingState
+import com.phone.antivirus.clean.aztac.presentation.ui.activities.junk_cleaner.components.JunkSelect
+import com.phone.antivirus.clean.aztac.presentation.ui.activities.junk_cleaner.components.JunksStatus
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
+import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class JunkLoadingUseCase @Inject constructor(
+    private val context: Context,
+    private val coroutineDispatcher: CoroutineDispatcher,
+    private val utils: Utils
+) {
+    private val _junkState = MutableStateFlow(JunkLoadingState())
+    val junkSate = _junkState.asStateFlow()
+
+    private val errorChannel: Channel<Boolean> = Channel()
+
+    private val ramModel = Junk(-1, "", "", FakeData.getFakeRamSize(), "", true)
+    private val threeGBInBytes: Long = 3L * 1024 * 1024 * 1024
+
+    suspend operator fun invoke() {
+        var givenDelay: Long = 50
+        setLog("Junk_Check", "Set state from start!")
+        withContext(coroutineDispatcher) {
+            setLog("Start Scanning")
+            if (!PermissionData.hasManagePermissions(context)) {
+                errorChannel.send(true)
+            } else {
+                val list = loadAllJunkFiles(context).subList(0, 110)
+                val memoryList = junkSate.value.apkList.toMutableList()
+                setLog("list Size = ${list.size}")
+                setLog("Junk_Check", "Junk list found!")
+                if (list.isEmpty()) {
+                    setLog("Junk_Check", "list is empty")
+                    val totalFiles = 5 // list.size or fake count
+                    val percentPerFile = 100 / totalFiles // 20% per file
+                    var percentage = 0
+
+                    for (i in 0 until totalFiles) {
+                        memoryList.add(
+                            ramModel.copy(
+                                id = System.currentTimeMillis(),
+                                name = "${System.currentTimeMillis()}.temp",
+                                size = FakeData.getFakeMBSizeInBetween(20, 50)
+                            )
+                        )
+
+                        // Smoothly increase percentage for this file
+                        val target = ((i + 1) * percentPerFile).coerceAtMost(100)
+                        while (percentage < target) {
+                            percentage++
+                            _junkState.update {
+                                it.copy(
+                                    apkList = memoryList,
+                                    allFiles = it.getAllFilesss(),
+                                    percentage = percentage
+                                )
+                            }
+                            delay(20) // control smoothness
+                        }
+                    }
+
+                    // Final force to 100%
+                    _junkState.update {
+                        it.copy(
+                            percentage = 100,
+                            completed = true,
+                            allFiles = it.getAllFilesss(),
+                            deleteProgress = 0,
+                            junksStatus = JunksStatus.CleanNow(data = it.getFileSize()),
+                            status = CleanStatus.CleanNow
+                        )
+                    }
+
+                } else {
+                    setLog("Junk_Check", "list is not empty")
+                    setLog("Junk_Check", "Size of list is: ${list.size}")
+                    givenDelay = when {
+                        list.size > 400 -> 100
+                        list.size > 300 -> 150
+                        list.size > 200 -> 200
+                        list.size > 100 -> 250
+                        list.size > 70 -> 300
+                        list.size > 50 -> 350
+                        list.size > 30 -> 400
+                        list.size > 10 -> 450
+                        else -> 1000
+                    }
+                }
+                setLog("Junk_Check", "Size of List: ${list.size}")
+                val targetSizeInBytes = list.size.toLong() * 1024 * 1024
+                val fakeMethodToCall: () -> Long = when (list.size) {
+                    in 1..20 -> {
+                        { FakeData.getFakeKBSizeInBetween(50, 200) }
+                    }
+
+                    in 21..100 -> {
+                        { FakeData.getFakeKBSizeInBetween(300, 600) }
+                    }
+
+                    in 101..500 -> {
+                        { FakeData.getFakeKBSizeInBetween(700, 1200) }
+                    }
+
+                    in 501..1000 -> {
+                        { FakeData.getFakeMBSizeInBetween(5, 10) }
+                    }
+
+                    in 1001..2000 -> {
+                        { FakeData.getFakeMBSizeInBetween(10, 15) }
+                    }
+
+                    in 2001..3000 -> {
+                        { FakeData.getFakeMBSizeInBetween(15, 20) }
+                    }
+
+                    else -> {
+                        { FakeData.getFakeMBSizeInBetween(20, 50) }
+                    }
+                }
+                list.let { allFolders ->
+                    val total = allFolders.size
+                    setLog("Junk_Check", "All folders size: $total")
+                    var previousPercent = 0
+                    val isFakeScanningEnable = true // Place its value on Remote
+
+                    allFolders.forEachIndexed { index, junk ->
+                        if (junkSate.value.btnCleanedClicked) return@forEachIndexed
+
+                        val targetPercent = ((index + 1) * 100) / total
+                        val steps = (previousPercent + 1)..targetPercent
+                        setLog("Junk_Check", "Target Percent: $targetPercent")
+                        setLog("Junk_Check", "Steps: $steps")
+
+                        for (p in steps) {
+                            _junkState.update {
+                                it.copy(percentage = p)
+                            }
+                            if (memoryList.sumOf { it.size } < targetSizeInBytes) {
+                                memoryList.add(
+                                    ramModel.copy(
+                                        id = System.currentTimeMillis(),
+                                        name = "${System.currentTimeMillis()}.temp",
+                                        size = fakeMethodToCall()
+                                    )
+                                )
+                            }
+                            if (isFakeScanningEnable) {
+                                delay(givenDelay / steps.count().coerceAtLeast(1))
+                            }
+                        }
+
+                        previousPercent = targetPercent
+
+//                        setLog("Junk_Check", "Current Path: ${junk.path}")
+                        _junkState.update {
+                            it.copy(currentPath = junk.path)
+                        }
+
+                        // Memory list addition
+                        /*if (memoryList.sumOf { it.size } < threeGBInBytes) {
+                            memoryList.add(
+                                ramModel.copy(
+                                    id = System.currentTimeMillis(),
+                                    name = "${System.currentTimeMillis()}.temp",
+                                    size = FakeData.getFakeRamSizeInBetween(20, 50)
+                                )
+                            )
+                        }*/
+
+                        // Simulate check
+                        checkJunksPlease(junk) { path ->
+                            _junkState.update {
+                                it.copy(currentPath = path)
+                            }
+                        }
+
+                        // Update files
+                        _junkState.update {
+                            it.copy(
+                                apkList = memoryList,
+                                allFiles = it.getAllFilesss()
+                            )
+                        }
+
+                        if (index == total - 1) {
+                            _junkState.update {
+                                it.copy(
+                                    apkList = memoryList,
+                                    percentage = 100,
+                                    completed = true,
+                                    deleteProgress = 0,
+                                    allFiles = it.getAllFilesss(),
+                                    junksStatus = JunksStatus.CleanNow(data = it.getFileSize()),
+                                    status = CleanStatus.CleanNow
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun stopJunkCleanProcess() {
+        setLog("Junk_Check", "State Update Means Stop Clean")
+        _junkState.value = JunkLoadingState()
+    }
+
+    suspend fun loadAllJunkFiles(context: Context): List<File> {
+        return withContext(coroutineDispatcher) {
+            val albumTempList = mutableListOf<File>()
+            try {
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val volumeNames = MediaStore.getExternalVolumeNames(context)
+                    val item = volumeNames.firstOrNull()
+                    MediaStore.Files.getContentUri(item ?: "external")
+                } else {
+                    MediaStore.Files.getContentUri("external")
+                }
+
+                if (!PermissionData.hasManagePermissions(context)) {
+                    return@withContext albumTempList
+                }
+
+                val projection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    arrayOf(MediaStore.Files.FileColumns.RELATIVE_PATH)
+                } else {
+                    arrayOf(MediaStore.Files.FileColumns.DATA)
+                }
+
+                val cursor2 = context.contentResolver.query(
+                    uri, projection, "${
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            MediaStore.Files.FileColumns.RELATIVE_PATH
+                        } else {
+                            MediaStore.Files.FileColumns.DATA
+                        }
+                    } like ? ", arrayOf("%android/media%"), null
+                )
+
+                cursor2?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        do {
+                            val path = cursor.getString(
+                                cursor.getColumnIndexOrThrow(
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Files.FileColumns.RELATIVE_PATH
+                                    else MediaStore.Files.FileColumns.DATA
+                                )
+                            )
+                            albumTempList.add(File(path))
+                        } while (cursor.moveToNext())
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace() // Add more specific logging here
+            }
+            return@withContext albumTempList
+        }
+    }
+
+
+    private suspend fun checkJunksPlease(mFile: File, onCheck: (String) -> Unit) {
+        withContext(coroutineDispatcher) {
+            if (mFile.isFile) {
+                onCheck.invoke(mFile.path)
+                val fileSize = mFile.length()
+                if (fileSize == 0L) {
+                    addInResidualList(mFile)
+                } else {
+                    with(mFile.name) {
+                        when {
+                            endsWith(".tmp") || endsWith(".hprof") || endsWith(".log") || endsWith(".xlog") || endsWith(
+                                ".chck"
+                            ) || endsWith(".nomedia") -> {
+                                addInTempList(mFile)
+                            }
+
+                            contains("cache") -> {
+                                addInCacheList(mFile)
+                            }
+
+                            endsWith(".apk") -> {
+                                addInApkList(mFile)
+                            }
+                        }
+                    }
+                }
+
+            } else {
+                val filesList = mFile.listFiles()?.toList() ?: emptyList()
+                if (filesList.isEmpty()) {
+                    addInEmptyList(mFile)
+                } else {
+                    filesList.forEach {
+                        onCheck.invoke(it.path)
+                        checkJunksPlease(it, onCheck)
+                    }
+                }
+            }
+        }
+    }
+
+
+    private fun addInEmptyList(junk: File) {
+        _junkState.update { currentState ->
+            currentState.copy(
+                emptyFoldersList = currentState.emptyFoldersList + junk.toJunkFile()
+            )
+        }
+    }
+
+    private fun addInApkList(junk: File) {
+        _junkState.update { currentState ->
+            currentState.copy(
+                apkList = currentState.apkList + junk.toJunkFile()
+            )
+        }
+    }
+
+    private fun addInTempList(junk: File) {
+        _junkState.update { currentState ->
+            currentState.copy(
+                temporaryFilesList = currentState.temporaryFilesList + junk.toJunkFile()
+            )
+        }
+    }
+
+    private fun addInCacheList(junk: File) {
+        _junkState.update { currentState ->
+            currentState.copy(
+                cacheList = currentState.cacheList + junk.toJunkFile()
+            )
+        }
+    }
+
+    private fun addInResidualList(junk: File) {
+        _junkState.update { currentState ->
+            currentState.copy(
+                residualList = currentState.residualList + junk.toJunkFile()
+            )
+        }
+    }
+
+    fun cleanAllJunks(junk: Long) {
+        // Perform the cleaning process
+        val filesToDelete = JunkCleanerActivity.Companion.selectedJunkFiles.toList()
+        filesToDelete.forEach { junkState ->
+            val file = File(junkState.path)
+            /*  setLog("clean_check", "path: ${junkState.path}")
+              setLog("clean_check", "file: ${file}")*/
+            if (file.exists()) {
+                if (file.canWrite()) {
+                    try {
+                        file.delete()
+                        setLog("clean_check", "Delete file : ${file}")
+                    } catch (e: Exception) {
+                        setLog("clean_check", "Exception: ${e.message}")
+                    }
+                } else {
+                    setLog("clean_check", "File can not read.")
+                }
+            } else {
+                setLog("clean_check", "File does not exist.")
+            }
+        }
+
+        // Update state after cleaning process
+        _junkState.update {
+            setLog("clean_check", "cleanAllJunks: junk state updated! clean complete.")
+            it.copy(
+                totalJunkSize = junk, completed = false
+            )
+        }
+
+    }
+
+    private fun File.toJunkFile(): Junk {
+        val size = this.length()
+        return Junk(
+            System.currentTimeMillis(),
+            this.name,
+            this.absolutePath,
+            size,
+            utils.sizeIntoMb(size).toString()
+        )
+    }
+
+    fun checkList(junkSelect: JunkSelect) {
+        when (junkSelect) {
+            is JunkSelect.AppMemoryList -> {
+                val list = if (junkSate.value.appMemoryList.containsAll(junkSelect.list)) {
+                    emptyList()
+                } else {
+                    junkSelect.list
+                }
+                _junkState.update {
+                    it.copy(
+                        appMemoryList = list
+                    )
+                }
+            }
+
+            is JunkSelect.CacheList -> {
+                val list = if (junkSate.value.cacheList.containsAll(junkSelect.list)) {
+                    emptyList()
+                } else {
+                    junkSelect.list
+                }
+                _junkState.update {
+                    it.copy(
+                        cacheList = list
+                    )
+                }
+            }
+
+            is JunkSelect.EmptyFolderList -> {
+                val list = if (junkSate.value.emptyFoldersList.containsAll(junkSelect.list)) {
+                    emptyList()
+                } else {
+                    junkSelect.list
+                }
+                _junkState.update {
+                    it.copy(
+                        emptyFoldersList = list
+                    )
+                }
+            }
+
+            is JunkSelect.ResidualList -> {
+                val list = if (junkSate.value.residualList.containsAll(junkSelect.list)) {
+                    emptyList()
+                } else {
+                    junkSelect.list
+                }
+                _junkState.update {
+                    it.copy(
+                        residualList = list
+                    )
+                }
+            }
+
+            is JunkSelect.TemporaryList -> {
+                val list = if (junkSate.value.temporaryFilesList.containsAll(junkSelect.list)) {
+                    emptyList()
+                } else {
+                    junkSelect.list
+                }
+                _junkState.update {
+                    it.copy(
+                        temporaryFilesList = list
+                    )
+                }
+            }
+        }
+    }
+
+    fun finishProcess() {
+        setLog("clean_check", "finish process called!")
+        _junkState.update {
+            it.copy(
+                junksStatus = JunksStatus.Cleaned(JunkCleanerActivity.Companion.selectedSize),
+                status = CleanStatus.Cleaned,
+                completed = false,
+                percentage = 0,
+                currentPath = "",
+                deleteProgress = 100
+            )
+        }
+    }
+
+    fun updateProgress(progress: Int) {
+        _junkState.update {
+            it.copy(
+                deleteProgress = progress
+            )
+        }
+    }
+}
